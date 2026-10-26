@@ -45,7 +45,7 @@ Tracks 21 key points per hand to recognize multi-hand dynamics:
 ## 📂 Project Structure
 
 ```
-memesight-ai/
+memesight/
 ├── memesight.py           # Main application loop & gesture engine
 ├── README.md              # Project documentation
 └── memes/                 # Reaction media directory
@@ -64,8 +64,8 @@ memesight-ai/
 ### 1️⃣ Clone the Repository
 
 ```bash
-git clone https://github.com/AkashChitti/memesight-ai.git
-cd memesight-ai
+git clone https://github.com/AkashChitti/memesight.git
+cd memesight
 ```
 
 ### 2️⃣ Install Dependencies
