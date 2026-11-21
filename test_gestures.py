@@ -165,11 +165,14 @@ check("starts idle", panel.frame(0.0) is m.IMG_IDLE_STARE)
 
 first = np.zeros((10, 10, 3), np.uint8)
 second = np.ones((10, 10, 3), np.uint8)
-panel.show_gif([(first, 0.1), (second, 0.1)])
+gif_clip = [(first, 0.1), (second, 0.1)]
+panel.show_gif(gif_clip)
 panel.next_frame_at = 10.0
 check("gif shows first frame", panel.frame(9.0) is first)
 check("gif holds until due", panel.frame(9.99) is first)
 check("gif advances on time", panel.frame(10.0) is second)
+panel.show_gif(gif_clip)                     # same gesture fires again
+check("same gif keeps playing", panel.index == 1)
 check("gif holds second frame", panel.frame(10.05) is second)
 check("gif ends in idle", panel.frame(10.2) is m.IMG_IDLE_STARE and panel.mode == "idle")
 
@@ -211,6 +214,10 @@ if writer.isOpened():
             stale += 1
         time.sleep(0.005)
     check("no frames leak from the replaced clip", stale == 0)
+
+    token = panel.token
+    panel.play_video(other)                   # same gesture fires again
+    check("same video keeps playing", panel.token == token and panel.mode == "video")
     panel.stop_video()
 else:
     print("skip  video playback (this OpenCV build has no mp4 writer)")

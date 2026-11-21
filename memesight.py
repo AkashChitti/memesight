@@ -348,9 +348,13 @@ class MemePanel:
         self.done = threading.Event()
         self.token = 0
         self.last_video_frame = None
+        self.video_path = None
         self.lock = threading.Lock()
 
     def show_gif(self, clip):
+        # Re-triggering the gesture that is already playing must not restart it.
+        if self.mode == "gif" and self.clip is clip:
+            return
         self.stop_video()
         self.mode = "gif"
         self.clip = clip or [(IMG_IDLE_STARE, 0.0)]
@@ -370,11 +374,15 @@ class MemePanel:
         self.index = 0
 
     def play_video(self, path):
+        # Re-triggering the gesture that is already playing must not restart it.
+        if self.mode == "video" and self.video_path == path and not self.done.is_set():
+            return
         self.stop_video()
         with self.lock:
             # Token changes and queue access share the lock, so a reader blocked
             # on a full queue can never enqueue a frame after this switch.
             self.mode = "video"
+            self.video_path = path
             self.last_video_frame = None
             self.done.clear()
             self.token += 1
@@ -388,6 +396,7 @@ class MemePanel:
             self.token += 1
             self._drop_frames()
             self.done.set()
+            self.video_path = None
 
     def _drop_frames(self):
         while True:
