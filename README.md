@@ -12,7 +12,7 @@ Tracks up to 468 facial mesh landmarks to trigger instant media responses:
 
 | Gesture | Movement / Trigger Description | Triggered Meme | 
 | ----- | ----- | ----- | 
-|  **Tongue Out + Head Shake** | Sideways head oscillation while sticking tongue out | `freaky-orca.gif` | 
+|  **Mouth Open + Head Shake** | Open mouth while shaking the head side to side (MediaPipe cannot see the tongue itself) | `freaky-orca.gif` | 
 |  **Head Nod** | Rapid vertical head movement | `ishowspeed.gif` | 
 |  **Idle Stare** | Neutral face looking directly at camera | `monkeytruth.jpg` | 
 
@@ -47,6 +47,8 @@ Tracks 21 key points per hand to recognize multi-hand dynamics:
 ```
 memesight/
 ├── memesight.py           # Main application loop & gesture engine
+├── requirements.txt      # Pinned dependencies
+├── test_gestures.py       # Headless checks for gestures, debounce & playback
 ├── README.md              # Project documentation
 └── memes/                 # Reaction media directory
     ├── freaky-orca.gif
@@ -71,8 +73,11 @@ cd memesight
 ### 2️⃣ Install Dependencies
 
 ```bash
-pip install opencv-python mediapipe pillow numpy
+pip install -r requirements.txt
 ```
+
+> **Note:** MemeSight uses MediaPipe's legacy `mp.solutions` API, which was removed in
+> `mediapipe` 0.10.30. `requirements.txt` pins the last release that still ships it.
 
 *(If on older OpenCV versions, install `pip install opencv-contrib-python`)*
 
@@ -83,6 +88,14 @@ python memesight.py
 ```
 
 > **Note:** Ensure your webcam is enabled. Perform gestures in clear lighting for optimal tracking!
+
+##  Tests
+
+```bash
+python test_gestures.py
+```
+
+Exercises every gesture detector, the debounce gate, the playback panel and a fake-camera loop — no webcam or display required.
 
 ##  Customization
 

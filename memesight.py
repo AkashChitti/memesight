@@ -1,143 +1,99 @@
+"""MemeSight AI — webcam gestures trigger memes in a split-screen window."""
+
+import queue
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
 import cv2
 import mediapipe as mp
 import numpy as np
-from collections import deque
-import threading
-import queue
-import time
-from PIL import Image 
+from PIL import Image
 
 # ==========================================
-#             FILE PATHS (ALL MEMES)
+#                 SETTINGS
 # ==========================================
 
-PATH_TONGUE_SHAKE      = r"memes\freaky-orca.gif"
-PATH_HAND_ON_CHIN      = r"memes\monkeythink.jpg"
-PATH_HEAD_NOD          = r"memes\ishowspeed.gif"
-PATH_ONE_FINGER_UP     = r"memes\monkeyrealize.jpeg"
-PATH_HANDS_ON_HEAD     = r"memes\ishowspeed-wow.gif"
-PATH_NAMASTE           = r"memes\freaky-sonic.mp4"
-PATH_THUMBS_UP         = r"memes\humbsupmonkey.png"
-PATH_IDLE_STARE        = r"memes\monkeytruth.jpg"
-IDLE_MIN_FRAMES = 70  # ~1+ second of stillness required
-idle_hold = 0         # internal counter
-palm_dist_buffer = deque(maxlen=20)
+PANEL_W, PANEL_H = 640, 480
+WINDOW_NAME = "MemeSight AI"
+MEME_DIR = Path(__file__).resolve().parent / "memes"
+
+COOLDOWN_SECONDS = 1.0        # ignore new gestures right after a trigger
+GESTURE_HOLD_SECONDS = 0.2    # how long a gesture must persist
+IDLE_STARE_SECONDS = 1.5      # stillness before the idle meme
+GIF_MIN_FRAME_SECONDS = 0.02  # floor for GIFs with broken frame durations
+CAMERA_INDEX = 0
+
+PATH_TONGUE_SHAKE      = MEME_DIR / "freaky-orca.gif"
+PATH_HAND_ON_CHIN      = MEME_DIR / "monkeythink.jpg"
+PATH_HEAD_NOD          = MEME_DIR / "ishowspeed.gif"
+PATH_ONE_FINGER_UP     = MEME_DIR / "monkeyrealize.jpeg"
+PATH_HANDS_ON_HEAD     = MEME_DIR / "ishowspeed-wow.gif"
+PATH_RUBBING_PALMS     = MEME_DIR / "freaky-sonic.mp4"
+PATH_THUMBS_UP         = MEME_DIR / "thumbsupmonkey.png"
+PATH_IDLE_STARE        = MEME_DIR / "monkeytruth.jpg"
 
 # ==========================================
-#          GIF LOADING ENGINE (OPTION A)
+#            MEDIA LOADING
 # ==========================================
 
-def load_gif_frames(path):
-    """Load all GIF frames as a list of BGR numpy arrays."""
-    frames = []
+
+def load_gif_clip(path):
+    """Return [(frame, seconds)] for a GIF, downscaling frames larger than the panel.
+
+    A large GIF expands to hundreds of megabytes once decoded, and the panel only
+    ever shows PANEL_W x PANEL_H.
+    """
+    clip = []
     try:
         gif = Image.open(path)
-    except:
-        print(f"❌ Error loading GIF: {path}")
-        return frames
-
-    try:
-        while True:
-            frame = gif.convert("RGB")
-            np_frame = np.array(frame)
-            bgr = cv2.cvtColor(np_frame, cv2.COLOR_RGB2BGR)
-            frames.append(bgr)
-            gif.seek(gif.tell() + 1)
-    except EOFError:
-        pass
-
-    return frames
-
-
-# Preload all GIFs at start for speed
-GIF_TONGUE_SHAKE  = load_gif_frames(PATH_TONGUE_SHAKE)
-GIF_HEAD_NOD      = load_gif_frames(PATH_HEAD_NOD)
-GIF_HANDS_ON_HEAD = load_gif_frames(PATH_HANDS_ON_HEAD)
-
-
-# ==========================================
-#       IMAGE LOADING FOR STILL MEMES
-# ==========================================
-
-IMG_HAND_ON_CHIN  = cv2.imread(PATH_HAND_ON_CHIN)
-IMG_ONE_FINGER_UP = cv2.imread(PATH_ONE_FINGER_UP)
-IMG_IDLE_STARE    = cv2.imread(PATH_IDLE_STARE)
-IMG_THUMBS_UP = cv2.imread(PATH_THUMBS_UP)
-if IMG_THUMBS_UP is None:
-    print("❌ ERROR: Cannot load thumbs up image")
-
-if IMG_HAND_ON_CHIN is None:
-    print("❌ ERROR: Cannot load monkeythink.jpg")
-
-if IMG_ONE_FINGER_UP is None:
-    print("❌ ERROR: Cannot load monkeyrealize.jpeg")
-
-if IMG_IDLE_STARE is None:
-    print("❌ ERROR: Cannot load monkeytruth.jpg")
-
-
-# ==========================================
-#            VIDEO PLAYBACK THREAD
-# ==========================================
-
-video_queue = queue.Queue(maxsize=1)
-play_video_flag = threading.Event()
-video_done_flag = threading.Event()
-
-CURRENT_VIDEO = None  # path of currently playing video
-
-
-def video_player_thread():
-    """Thread that plays MP4 meme videos ONCE and outputs frames to queue."""
-    global CURRENT_VIDEO
+    except OSError:
+        return clip
 
     while True:
-        play_video_flag.wait()
+        try:
+            gif.seek(len(clip))
+        except EOFError:
+            break
 
-        vid = cv2.VideoCapture(CURRENT_VIDEO)
+        bgr = cv2.cvtColor(np.array(gif.convert("RGB")), cv2.COLOR_RGB2BGR)
+        if bgr.shape[1] > PANEL_W or bgr.shape[0] > PANEL_H:
+            bgr = cv2.resize(bgr, (PANEL_W, PANEL_H))
 
-        if not vid.isOpened():
-            print("❌ Unable to open video:", CURRENT_VIDEO)
-            play_video_flag.clear()
-            continue
+        delay = gif.info.get("duration", 0) / 1000.0
+        clip.append((bgr, max(delay, GIF_MIN_FRAME_SECONDS)))
 
-        while play_video_flag.is_set():
-            ok, frame = vid.read()
-            if not ok:
-                break  # stop at end of video
-
-            if not video_queue.full():
-                video_queue.put(frame)
-
-            time.sleep(0.01)
-
-        vid.release()
-        video_done_flag.set()
-        play_video_flag.clear()
+    return clip
 
 
-threading.Thread(target=video_player_thread, daemon=True).start()
+GIF_TONGUE_SHAKE  = load_gif_clip(PATH_TONGUE_SHAKE)
+GIF_HEAD_NOD      = load_gif_clip(PATH_HEAD_NOD)
+GIF_HANDS_ON_HEAD = load_gif_clip(PATH_HANDS_ON_HEAD)
 
+IMG_HAND_ON_CHIN  = cv2.imread(str(PATH_HAND_ON_CHIN))
+IMG_ONE_FINGER_UP = cv2.imread(str(PATH_ONE_FINGER_UP))
+IMG_IDLE_STARE    = cv2.imread(str(PATH_IDLE_STARE))
+IMG_THUMBS_UP     = cv2.imread(str(PATH_THUMBS_UP))
 
-# ==========================================
-#      STATE MANAGEMENT + GLOBAL SETTINGS
-# ==========================================
+MISSING_MEDIA = [
+    path.name
+    for path, asset in (
+        (PATH_TONGUE_SHAKE, GIF_TONGUE_SHAKE),
+        (PATH_HEAD_NOD, GIF_HEAD_NOD),
+        (PATH_HANDS_ON_HEAD, GIF_HANDS_ON_HEAD),
+        (PATH_HAND_ON_CHIN, IMG_HAND_ON_CHIN),
+        (PATH_ONE_FINGER_UP, IMG_ONE_FINGER_UP),
+        (PATH_IDLE_STARE, IMG_IDLE_STARE),
+        (PATH_THUMBS_UP, IMG_THUMBS_UP),
+    )
+    if asset is None or (isinstance(asset, list) and not asset)
+]
 
-# Gesture cooldown (prevents spamming)
-COOLDOWN_FRAMES = 30
-cooldown = 0
-
-# For sustained gestures
-REQUIRED_FRAMES = 6
-
-# Buffers for nod & shake detection
-nose_x_buffer = deque(maxlen=15)
-nose_y_buffer = deque(maxlen=20)
-
-# Flags for which meme is active
-active_mode = "idle"     # idle / gif / video / image
-current_gif_frames = []
-current_gif_index = 0
+if MISSING_MEDIA:
+    raise SystemExit(
+        f"❌ Missing or unreadable meme files in {MEME_DIR}: {', '.join(MISSING_MEDIA)}"
+    )
 
 # ==========================================
 #         MEDIAPIPE INITIALIZATION
@@ -153,14 +109,35 @@ hands = mp_hands.Hands(
     min_tracking_confidence=0.6
 )
 
+# Buffers of recent samples. They only hold frames where the relevant model fired,
+# so every detector clears its buffer when its input disappears.
+nose_x_buffer = deque(maxlen=15)
+nose_y_buffer = deque(maxlen=20)
+palm_dist_buffer = deque(maxlen=20)
+
 
 # ==========================================
 #       GESTURE DETECTION FUNCTIONS
 # ==========================================
 
-# ------------------------------
-# 1. Tongue OUT detection
-# ------------------------------
+def count_reversals(values):
+    """How many times a sample sequence changes direction (ignoring tiny jitter)."""
+    samples = list(values)
+    reversals = 0
+    last_sign = 0
+    for previous, current in zip(samples, samples[1:]):
+        delta = current - previous
+        if abs(delta) < 0.001:
+            continue
+        sign = 1 if delta > 0 else -1
+        if last_sign and sign != last_sign:
+            reversals += 1
+        last_sign = sign
+    return reversals
+
+
+# 1. Mouth open (FaceMesh has no tongue landmark, so "tongue out" is really
+#    an open mouth) + head shake.
 def detect_tongue(lm):
     upper = lm[13].y
     lower = lm[14].y
@@ -168,37 +145,23 @@ def detect_tongue(lm):
     return (lower - upper) > 0.01 and (tongue - lower) > 0.01
 
 
-# ------------------------------
-# 2. Head SHAKE detection
-# ------------------------------
+# 2. Head SHAKE: sideways motion that actually reverses direction.
 def detect_head_shake():
     if len(nose_x_buffer) < 15:
         return False
     motion = max(nose_x_buffer) - min(nose_x_buffer)
-    return motion > 0.03
+    return motion > 0.03 and count_reversals(nose_x_buffer) >= 2
 
 
-# ------------------------------
-# 3. Head NOD detection
-# ------------------------------
+# 3. Head NOD: vertical motion that actually reverses direction.
 def detect_head_nod():
     if len(nose_y_buffer) < 15:
         return False
-
-    y_vals = list(nose_y_buffer)
-    min_y = min(y_vals)
-    max_y = max(y_vals)
-
-    # Must move DOWN then UP or UP then DOWN
-    motion = max_y - min_y
-
-    return motion > 0.07
+    motion = max(nose_y_buffer) - min(nose_y_buffer)
+    return motion > 0.07 and count_reversals(nose_y_buffer) >= 2
 
 
-
-# ------------------------------
-# 4. Hand ON CHIN gesture
-# ------------------------------
+# 4. Hand ON CHIN.
 def detect_hand_on_chin(face_lm, hand_lm):
     chin = face_lm[199]
     tip = hand_lm.landmark[8]  # index finger tip
@@ -206,13 +169,10 @@ def detect_hand_on_chin(face_lm, hand_lm):
     dx = chin.x - tip.x
     dy = chin.y - tip.y
 
-    dist = (dx*dx + dy*dy)**0.5
-    return dist < 0.12
+    return (dx * dx + dy * dy) ** 0.5 < 0.12
 
 
-# ------------------------------
-# 5. One finger pointing UP
-# ------------------------------
+# 5. One finger pointing UP.
 def detect_one_finger_up(hand_lm):
     index_up = hand_lm.landmark[8].y < hand_lm.landmark[7].y
     mid_down = hand_lm.landmark[12].y > hand_lm.landmark[11].y
@@ -222,143 +182,80 @@ def detect_one_finger_up(hand_lm):
     return index_up and mid_down and ring_down and pinky_down
 
 
-# ------------------------------
-# 6. Both hands ON HEAD
-# ------------------------------
+# 6. Both hands ON HEAD: above the forehead and within head width of its centre.
 def detect_hands_on_head(face_lm, hand_list):
     if len(hand_list) < 2:
         return False
 
-    forehead_y = face_lm[10].y  # forehead landmark
+    forehead = face_lm[10]
 
-    tips = [hand.landmark[8].y for hand in hand_list]
+    for hand in hand_list:
+        tip = hand.landmark[8]
+        if tip.y >= forehead.y + 0.02:
+            return False
+        if abs(tip.x - forehead.x) > 0.30:
+            return False
+    return True
 
-    return all(tip < forehead_y + 0.02 for tip in tips)
 
-
+# 7. Palms rubbing: close together AND oscillating back and forth.
 def detect_rubbing_palms(hand_list):
-    # Need 2 hands
+    # Clearing on separation stops stale distances from an earlier two-hand frame
+    # from faking oscillation.
     if len(hand_list) < 2:
+        palm_dist_buffer.clear()
         return False
 
-    h1 = hand_list[0].landmark
-    h2 = hand_list[1].landmark
+    p1 = hand_list[0].landmark[9]   # palm centre
+    p2 = hand_list[1].landmark[9]
 
-    # Palm centers (landmark 9)
-    p1 = h1[9]
-    p2 = h2[9]
-
-    # Distance between palms
     dx = p1.x - p2.x
     dy = p1.y - p2.y
-    dist = (dx*dx + dy*dy) ** 0.5
-
-    # Record in buffer
+    dist = (dx * dx + dy * dy) ** 0.5
     palm_dist_buffer.append(dist)
 
-    # Need enough data
     if len(palm_dist_buffer) < 20:
         return False
 
-    # Measure oscillation strength
-    diff = max(palm_dist_buffer) - min(palm_dist_buffer)
-
-    # Threshold tuning
-    rubbing_detected = diff > 0.06  # motion amplitude required
-
-    # Palms must be close enough to count as rubbing
-    close_enough = dist < 0.18
-
-    return rubbing_detected and close_enough
+    oscillation = max(palm_dist_buffer) - min(palm_dist_buffer)
+    return oscillation > 0.06 and count_reversals(palm_dist_buffer) >= 3 and dist < 0.18
 
 
-# ------------------------------
-# 8. Thumbs up gesture
-# ------------------------------
-'''
+# 8. Thumbs up: thumb points up, every other finger is curled.
 def detect_thumbs_up(hand_lm):
-    thumb_tip = hand_lm.landmark[4].y
-    thumb_ip  = hand_lm.landmark[3].y
+    lm = hand_lm.landmark
 
-    index_tip = hand_lm.landmark[8].y
+    thumb_up = lm[4].y < lm[3].y < lm[2].y
+    fingers_curled = all(lm[tip].y > lm[pip].y for tip, pip in
+                         ((8, 6), (12, 10), (16, 14), (20, 18)))
+    return thumb_up and fingers_curled
 
-    return (thumb_tip < thumb_ip) and (index_tip > hand_lm.landmark[5].y)
-'''
 
-# ------------------------------
-# 9. Idle stare (face stable + eyes forward)
-# ------------------------------
+# 9. Idle stare: head still and irises centred in their eyes.
+def gaze_ratio(iris, inner_corner, outer_corner):
+    span = outer_corner.x - inner_corner.x
+    if abs(span) < 1e-6:
+        return 0.5
+    return (iris.x - inner_corner.x) / span
+
+
 def detect_idle_stare(face_lm):
-    """
-    Detects when the user is truly idle:
-      - Head barely moving
-      - Face centered
-      - Eyes looking straight
-    """
-
-    # Must have enough buffer data
     if len(nose_x_buffer) < 15 or len(nose_y_buffer) < 15:
         return False
 
-    # STRONG stability requirement (reduced thresholds)
     stable_x = (max(nose_x_buffer) - min(nose_x_buffer)) < 0.005
     stable_y = (max(nose_y_buffer) - min(nose_y_buffer)) < 0.005
-
     if not (stable_x and stable_y):
         return False
 
-    # Eyes forward (stricter requirement)
-    left_eye = face_lm[468]
-    right_eye = face_lm[473]
+    # Iris landmarks only exist with refine_landmarks; without them, a still head
+    # is all we can measure.
+    if len(face_lm) <= 473:
+        return True
 
-    facing_forward = abs(left_eye.x - right_eye.x) < 0.08
-
-    return facing_forward
-
-# ==========================================
-#   PLAYBACK ENGINE + GESTURE PRIORITY SYSTEM
-# ==========================================
-
-def activate_gif(gif_frames):
-    """Prepare system to play a GIF animation once."""
-    global active_mode, current_gif_frames, current_gif_index
-
-    active_mode = "gif"
-    current_gif_frames = gif_frames
-    current_gif_index = 0
-    video_done_flag.set()       # no video playing
-    play_video_flag.clear()     # ensure video thread stops
-
-
-def activate_image(img):
-    """Show a static image."""
-    global active_mode, current_gif_frames
-
-    active_mode = "image"
-    current_gif_frames = [img]  # stored as 1-frame list
-    video_done_flag.set()
-    play_video_flag.clear()
-
-
-def activate_video(path):
-    """Trigger video playback."""
-    global active_mode, CURRENT_VIDEO
-
-    active_mode = "video"
-    CURRENT_VIDEO = path
-    video_done_flag.clear()
-    play_video_flag.set()       # start video thread
-
-
-def set_idle_state():
-    """Show idle meme and wait for next gesture."""
-    global active_mode, current_gif_frames, current_gif_index
-
-    active_mode = "idle"
-    current_gif_frames = [IMG_IDLE_STARE]
-    current_gif_index = 0
-    play_video_flag.clear()
-    video_done_flag.set()
+    left = gaze_ratio(face_lm[468], face_lm[133], face_lm[33])
+    right = gaze_ratio(face_lm[473], face_lm[362], face_lm[263])
+    return 0.2 < left < 0.8 and 0.2 < right < 0.8
 
 
 # ==========================================
@@ -370,260 +267,345 @@ def evaluate_gesture_priority(
         hand_chin,
         head_nod,
         one_finger_up,
+        thumbs_up,
         hands_on_head,
         rubbing_palms_flag,
         idle_stare
     ):
-    """
-    Determines which meme to trigger based on priority.
-    Returns a string key representing the selected gesture.
-    """
+    """Return the key of the highest-priority gesture that fired, or "none"."""
 
     if tongue_shake:
         return "tongue_shake"
-
     if hand_chin:
         return "hand_chin"
-
     if head_nod:
         return "head_nod"
-
     if one_finger_up:
         return "one_finger_up"
-
+    if thumbs_up:
+        return "thumbs_up"
     if hands_on_head:
         return "hands_on_head"
-
     if rubbing_palms_flag:
         return "rubbing_palms"
-
     if idle_stare:
         return "idle"
-
     return "none"
+
+
+# ==========================================
+#        TRIGGER DEBOUNCE
+# ==========================================
+
+class TriggerGate:
+    """Turns a per-frame gesture key into a debounced trigger.
+
+    A gesture must stay top-priority for hold_seconds, then no trigger is accepted
+    for cooldown_seconds. Both are wall-clock, so behaviour does not change with FPS.
+    """
+
+    def __init__(self, hold_seconds, cooldown_seconds):
+        self.hold_seconds = hold_seconds
+        self.cooldown_seconds = cooldown_seconds
+        self._since = None
+        self._key = None
+        self._blocked_until = 0.0
+
+    def update(self, key, now):
+        """Return the gesture to fire, or None."""
+        if now < self._blocked_until or key == "none":
+            self._since = None
+            self._key = None
+            return None
+
+        if key != self._key:
+            self._key = key
+            self._since = now
+            return None
+
+        if now - self._since >= self.hold_seconds:
+            self._blocked_until = now + self.cooldown_seconds
+            self._since = None
+            self._key = None
+            return key
+
+        return None
+
+
+# ==========================================
+#        PLAYBACK PANEL (RIGHT HALF)
+# ==========================================
+
+class MemePanel:
+    """Owns what the right half shows and when an animated clip advances."""
+
+    def __init__(self):
+        self.mode = "idle"          # idle / image / gif / video
+        self.clip = [(IMG_IDLE_STARE, 0.0)]
+        self.index = 0
+        self.next_frame_at = 0.0
+        self.frames = queue.Queue(maxsize=2)
+        self.done = threading.Event()
+        self.token = 0
+        self.last_video_frame = None
+        self.lock = threading.Lock()
+
+    def show_gif(self, clip):
+        self.stop_video()
+        self.mode = "gif"
+        self.clip = clip or [(IMG_IDLE_STARE, 0.0)]
+        self.index = 0
+        self.next_frame_at = time.monotonic() + self.clip[0][1]
+
+    def show_image(self, img):
+        self.stop_video()
+        self.mode = "image"
+        self.clip = [(img, 0.0)]
+        self.index = 0
+
+    def show_idle(self):
+        self.stop_video()
+        self.mode = "idle"
+        self.clip = [(IMG_IDLE_STARE, 0.0)]
+        self.index = 0
+
+    def play_video(self, path):
+        self.stop_video()
+        with self.lock:
+            # Token changes and queue access share the lock, so a reader blocked
+            # on a full queue can never enqueue a frame after this switch.
+            self.mode = "video"
+            self.last_video_frame = None
+            self.done.clear()
+            self.token += 1
+            token = self.token
+        threading.Thread(
+            target=self._read_video, args=(path, token), daemon=True
+        ).start()
+
+    def stop_video(self):
+        with self.lock:
+            self.token += 1
+            self._drop_frames()
+            self.done.set()
+
+    def _drop_frames(self):
+        while True:
+            try:
+                self.frames.get_nowait()
+            except queue.Empty:
+                return
+
+    def _current(self, token):
+        return token == self.token and self.mode == "video"
+
+    def _queue_frame(self, frame, token):
+        """Block until this frame is queued, giving up if the clip changed."""
+        while True:
+            with self.lock:
+                if not self._current(token):
+                    return False
+                try:
+                    self.frames.put_nowait(frame)
+                    return True
+                except queue.Full:
+                    pass
+            time.sleep(0.005)
+
+    def _read_video(self, path, token):
+        cap = cv2.VideoCapture(str(path))
+        try:
+            if not cap.isOpened():
+                print(f"❌ Unable to open video: {path}")
+                return
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            delay = 1.0 / fps if 1 <= fps <= 120 else 1.0 / 30
+
+            while self._current(token):
+                started = time.monotonic()
+                ok, frame = cap.read()
+                if not ok:
+                    break
+
+                if not self._queue_frame(frame, token):
+                    break
+
+                time.sleep(max(0.0, delay - (time.monotonic() - started)))
+        finally:
+            cap.release()
+            if token == self.token:
+                self.done.set()
+
+    def frame(self, now=None):
+        """Return the panel image for display now (None means "nothing yet")."""
+        now = time.monotonic() if now is None else now
+
+        if self.mode == "video":
+            try:
+                self.last_video_frame = self.frames.get_nowait()
+            except queue.Empty:
+                if self.done.is_set():
+                    self.show_idle()
+                    return IMG_IDLE_STARE
+            return self.last_video_frame
+
+        if self.mode == "gif":
+            if now >= self.next_frame_at:
+                if self.index + 1 >= len(self.clip):
+                    self.show_idle()
+                    return IMG_IDLE_STARE
+                self.index += 1
+                self.next_frame_at = now + self.clip[self.index][1]
+            return self.clip[self.index][0]
+
+        return self.clip[0][0]
+
+
+def to_panel(img):
+    """Normalize any meme asset to a PANEL_W x PANEL_H BGR frame."""
+    if img is None:
+        return np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if img.shape[2] == 4:
+        img = img[:, :, :3]
+    if img.shape[1] != PANEL_W or img.shape[0] != PANEL_H:
+        img = cv2.resize(img, (PANEL_W, PANEL_H))
+    return img
 
 
 # ==========================================
 #                 MAIN LOOP
 # ==========================================
 
-cap = cv2.VideoCapture(0)
+def main():
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    if not cap.isOpened():
+        raise SystemExit(f"❌ Could not open webcam (device {CAMERA_INDEX}).")
 
-frame_counter = 0
-gesture_hold = 0   # frames gesture is sustained
+    panel = MemePanel()
+    gate = TriggerGate(GESTURE_HOLD_SECONDS, COOLDOWN_SECONDS)
+    idle_since = None
 
+    actions = {
+        "tongue_shake": lambda: panel.show_gif(GIF_TONGUE_SHAKE),
+        "hand_chin": lambda: panel.show_image(IMG_HAND_ON_CHIN),
+        "head_nod": lambda: panel.show_gif(GIF_HEAD_NOD),
+        "one_finger_up": lambda: panel.show_image(IMG_ONE_FINGER_UP),
+        "thumbs_up": lambda: panel.show_image(IMG_THUMBS_UP),
+        "hands_on_head": lambda: panel.show_gif(GIF_HANDS_ON_HEAD),
+        "rubbing_palms": lambda: panel.play_video(PATH_RUBBING_PALMS),
+        "idle": panel.show_idle,
+    }
 
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        break
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                print("❌ Lost the webcam feed.")
+                break
 
-    frame = cv2.flip(frame, 1)
-    h, w, _ = frame.shape
-    cam_h = 480
-    cam_w = 640
+            now = time.monotonic()
+            frame = cv2.flip(frame, 1)
+            resized_cam = cv2.resize(frame, (PANEL_W, PANEL_H))
 
-    resized_cam = cv2.resize(frame, (cam_w, cam_h))
+            # ------------------------------------------
+            # Run FaceMesh + Hands
+            # ------------------------------------------
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            face_result = face_mesh.process(rgb)
+            hands_result = hands.process(rgb)
 
-    # ------------------------------------------
-    # Run FaceMesh + Hands
-    # ------------------------------------------
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    face_result = face_mesh.process(rgb)
-    hands_result = hands.process(rgb)
+            face_lm = None
+            hand_lms = []
 
-    face_lm = None
-    hand_lms = []
+            if face_result.multi_face_landmarks:
+                face_lm = face_result.multi_face_landmarks[0].landmark
+                nose_x_buffer.append(face_lm[1].x)
+                nose_y_buffer.append(face_lm[1].y)
 
-    if face_result.multi_face_landmarks:
-        face_lm = face_result.multi_face_landmarks[0].landmark
+            if hands_result.multi_hand_landmarks:
+                hand_lms = hands_result.multi_hand_landmarks
 
-        # Update nose movement buffers
-        nose_x_buffer.append(face_lm[1].x)
-        nose_y_buffer.append(face_lm[1].y)
-
-    if hands_result.multi_hand_landmarks:
-        hand_lms = hands_result.multi_hand_landmarks
-
-
-    # ------------------------------------------
-    # Detect all gestures
-    # ------------------------------------------
-    if face_lm:
-        tongue_out = detect_tongue(face_lm)
-        shake = detect_head_shake()
-    
-        nod = detect_head_nod()
-
-        # IDLE stare logic using hold counter
-        if detect_idle_stare(face_lm) and len(hand_lms) == 0:
-            idle_hold += 1
-        else:
-            idle_hold = 0
-
-        idle = (idle_hold >= IDLE_MIN_FRAMES)
-    else:
-        tongue_out = shake = nod = idle = False
-        idle_hold = 0  # reset if face not detected
-    tongue_shake = tongue_out and shake
-
-    hand_chin = False
-    one_finger_up = False
-    hands_on_head = False
-    rubbing_palms_flag = False
-
-    if hand_lms:
-    # 1 hand
-        if len(hand_lms) == 1:
-            hl = hand_lms[0]
+            # ------------------------------------------
+            # Detect all gestures
+            # ------------------------------------------
             if face_lm:
-                hand_chin = detect_hand_on_chin(face_lm, hl)
+                tongue_shake = detect_tongue(face_lm) and detect_head_shake()
+                nod = detect_head_nod()
+                still = detect_idle_stare(face_lm)
+            else:
+                tongue_shake = nod = still = False
+                # Drop stale samples so re-entry cannot fake a nod or shake.
+                nose_x_buffer.clear()
+                nose_y_buffer.clear()
 
-            one_finger_up = detect_one_finger_up(hl)
-            # thumbs_up = detect_thumbs_up(hl)  # <-- DISABLED
+            # Idle physically requires a still, hand-free face.
+            if still and not hand_lms:
+                idle_since = idle_since or now
+            else:
+                idle_since = None
+            idle = idle_since is not None and now - idle_since >= IDLE_STARE_SECONDS
 
-    # 2+ hands
-    if len(hand_lms) >= 2 and face_lm:
-        hands_on_head = detect_hands_on_head(face_lm, hand_lms)
-        rubbing_palms_flag = detect_rubbing_palms(hand_lms)
+            hand_chin = False
+            one_finger_up = False
+            thumbs_up = False
+            hands_on_head = False
 
+            if hand_lms:
+                if len(hand_lms) == 1:
+                    hl = hand_lms[0]
+                    if face_lm:
+                        hand_chin = detect_hand_on_chin(face_lm, hl)
+                    one_finger_up = detect_one_finger_up(hl)
+                    thumbs_up = detect_thumbs_up(hl)
 
-    # ------------------------------------------
-    # Apply PRIORITY engine
-    # ------------------------------------------
-    highest = evaluate_gesture_priority(
-        tongue_shake,
-        hand_chin,
-        nod,
-        one_finger_up,
-        hands_on_head,
-        rubbing_palms_flag,
-        idle
-    )
+                # Keep the palm buffer fresh even while the face is out of frame.
+                rubbing_palms_flag = detect_rubbing_palms(hand_lms)
 
-    # ------------------------------------------
-    # Apply COOLDOWN (prevents constant triggering)
-    # ------------------------------------------
-    if cooldown > 0:
-        cooldown -= 1
-        highest = "none"  # ignore new triggers
+                if len(hand_lms) >= 2 and face_lm:
+                    hands_on_head = detect_hands_on_head(face_lm, hand_lms)
+            else:
+                rubbing_palms_flag = detect_rubbing_palms(hand_lms)
 
-    # ------------------------------------------
-    # Trigger meme only when gesture is sustained
-    # ------------------------------------------
-    if highest != "none":
-        # Thumbs up allows faster triggering
-        if highest == "thumbs_up":
-            gesture_hold += 2     # double count
-        else:
-            gesture_hold += 1
-    else:
-        gesture_hold = 0
+            # ------------------------------------------
+            # Priority engine + debounce
+            # ------------------------------------------
+            highest = evaluate_gesture_priority(
+                tongue_shake,
+                hand_chin,
+                nod,
+                one_finger_up,
+                thumbs_up,
+                hands_on_head,
+                rubbing_palms_flag,
+                idle
+            )
 
+            fired = gate.update(highest, now)
+            if fired:
+                print("🎯 Trigger:", fired)
+                actions[fired]()
 
-    if gesture_hold >= REQUIRED_FRAMES and cooldown == 0:
-        print("🎯 Trigger:", highest)
+            # ------------------------------------------
+            # Combine webcam (left) + meme (right)
+            # ------------------------------------------
+            combined = cv2.hconcat([resized_cam, to_panel(panel.frame(now))])
+            cv2.imshow(WINDOW_NAME, combined)
 
-        # Reset
-        gesture_hold = 0
-        cooldown = COOLDOWN_FRAMES
-
-        # Trigger meme based on gesture key
-        if highest == "tongue_shake":
-            activate_gif(GIF_TONGUE_SHAKE)
-
-        elif highest == "hand_chin":
-            activate_image(IMG_HAND_ON_CHIN)
-
-        elif highest == "head_nod":
-            activate_gif(GIF_HEAD_NOD)
-
-        elif highest == "one_finger_up":
-            activate_image(IMG_ONE_FINGER_UP)
-
-        elif highest == "hands_on_head":
-            activate_gif(GIF_HANDS_ON_HEAD)
-
-        elif highest == "rubbing_palms":
-            activate_video(PATH_NAMASTE)
-
-
- #       elif highest == "thumbs_up":
-  #          activate_gif(IMG_THUMBS_UP)
-
-        elif highest == "idle":
-            set_idle_state()
+            # Quit on ESC or when the window is closed
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+            if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                break
+    finally:
+        cap.release()
+        panel.stop_video()
+        face_mesh.close()
+        hands.close()
+        cv2.destroyAllWindows()
 
 
-    # ------------------------------------------
-    # BUILD RIGHT PANEL (GIF / IMAGE / VIDEO)
-    # ------------------------------------------
-    if active_mode == "gif":
-        if len(current_gif_frames) > 0:
-            frame_to_show = current_gif_frames[current_gif_index]
-
-            current_gif_index += 1
-
-            if current_gif_index >= len(current_gif_frames):
-                # GIF finished → go idle
-                set_idle_state()
-
-            frame_to_show = cv2.resize(frame_to_show, (cam_w, cam_h))
-        else:
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-
-    elif active_mode == "image":
-        if len(current_gif_frames) > 0:
-            frame_to_show = cv2.resize(current_gif_frames[0], (cam_w, cam_h))
-        else:
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-
-    elif active_mode == "video":
-        if not video_queue.empty():
-            frame_to_show = cv2.resize(video_queue.get(), (cam_w, cam_h))
-        elif video_done_flag.is_set():
-            set_idle_state()
-            frame_to_show = cv2.resize(IMG_IDLE_STARE, (cam_w, cam_h))
-        else:
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-    elif active_mode == "idle":
-        frame_to_show = cv2.resize(IMG_IDLE_STARE, (cam_w, cam_h))
-
-    else:
-        frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-
-    # ------------------------------------------
-    # Combine webcam (left) + meme (right)
-    # ------------------------------------------
-    # --- SAFETY NORMALIZATION FOR frame_to_show ---
-
-    # If frame_to_show is None or not an array, make it a black image
-    if frame_to_show is None or not isinstance(frame_to_show, np.ndarray):
-        frame_to_show = np.zeros_like(resized_cam)
-
-    # If it's 2D (grayscale), convert to BGR
-    if len(frame_to_show.shape) == 2:
-        frame_to_show = cv2.cvtColor(frame_to_show, cv2.COLOR_GRAY2BGR)
-
-    # If it's 4-channel (e.g. from some PNG/GIF with alpha), drop alpha
-    if frame_to_show.shape[2] == 4:
-        frame_to_show = frame_to_show[:, :, :3]
-
-    # Finally, resize to match webcam size
-    frame_to_show = cv2.resize(frame_to_show, (resized_cam.shape[1], resized_cam.shape[0]))
-
-    combined = cv2.hconcat([resized_cam, frame_to_show])
-    cv2.imshow("Freak Detector", combined)
-
-
-    # Quit on ESC
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
-
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
